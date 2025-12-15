@@ -41,12 +41,14 @@ def initialize_files():
 
 initialize_files()
 
+
 def get_drive_service():
     creds = Credentials.from_service_account_info(
-        st.secrets["GOOGLE_SERVICE_ACCOUNT_KEY"],
+        st.secrets["gcp_service_account"],
         scopes=["https://www.googleapis.com/auth/drive"]
     )
     return build("drive", "v3", credentials=creds)
+
 
 def get_drive_file_id(filename):
     service = get_drive_service()
