@@ -3,6 +3,9 @@ import pandas as pd
 from datetime import datetime
 import os
 import csv
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 import io
 
 # plotting libraries
@@ -38,6 +41,26 @@ def initialize_files():
 
 initialize_files()
 
+def get_drive_service():
+    creds = Credentials.from_service_account_info(
+        st.secrets["GOOGLE_SERVICE_ACCOUNT_KEY"],
+        scopes=["https://www.googleapis.com/auth/drive"]
+    )
+    return build("drive", "v3", credentials=creds)
+
+def get_drive_file_id(filename):
+    service = get_drive_service()
+    folder_id = st.secrets["drive"]["folder_id"]
+
+    query = f"name='{filename}' and '{folder_id}' in parents and trashed=false"
+    results = service.files().list(q=query, fields="files(id)").execute()
+    files = results.get("files", [])
+
+    if files:
+        return files[0]["id"]
+    return None
+
+
 # -------------------------
 # Data Utilities
 # -------------------------
@@ -48,20 +71,23 @@ def _ensure_transaction_columns(df):
             df[col] = "" if col != "Amount" else 0
     return df[expected]
 
+
 def load_transactions():
-    """Loads transactions.csv and normalizes types. Date column returned as string (DD/MM/YYYY) in CSV, with Date_dt used internally."""
-    if os.path.exists(TRANSACTION_FILE):
-        df = pd.read_csv(TRANSACTION_FILE, dtype=str)
-        df = _ensure_transaction_columns(df)
-        # Convert Amount to numeric safely
-        df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0.0)
-        # Normalize Date to datetime where possible
-        df["Date_dt"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
-        # Fill missing Date_dt with today (but keep Date column updated when saving)
-        df["Date_dt"] = df["Date_dt"].fillna(pd.to_datetime(datetime.today().strftime("%d/%m/%Y"), dayfirst=True))
-        return df
-    else:
-        return pd.DataFrame(columns=["Date", "Amount", "Category", "Description", "Mode", "GroupName", "Date_dt"])
+    service = get_drive_service()
+    folder_id = st.secrets["DRIVE_FOLDER_ID"]
+
+    query = f"'{folder_id}' in parents and name='transactions.csv'"
+    results = service.files().list(q=query).execute()
+    files = results.get("files", [])
+
+    if not files:
+        return pd.DataFrame(columns=["Date","Amount","Category","Description","Mode","GroupName"])
+
+    file_id = files[0]["id"]
+    request = service.files().get_media(fileId=file_id)
+    data = io.BytesIO(request.execute())
+
+    return pd.read_csv(data)
 
 
 def save_transaction(date, amount, category, description, mode, group_name):
@@ -76,34 +102,105 @@ def save_transaction(date, amount, category, description, mode, group_name):
         "GroupName": group_name
     }])
 
-    # Use concat instead of append (append removed in pandas 2.0)
     df = pd.concat([df, new_row], ignore_index=True)
 
-    # Sort by date newest first
     df["Date"] = pd.to_datetime(df["Date"], dayfirst=True)
     df = df.sort_values("Date", ascending=False)
-
-    # Format date back to DD/MM/YYYY
     df["Date"] = df["Date"].dt.strftime("%d/%m/%Y")
 
-    df.to_csv(TRANSACTION_FILE, index=False)
+    # Upload back to Drive
+    service = get_drive_service()
+    folder_id = st.secrets["DRIVE_FOLDER_ID"]
+
+    csv_bytes = io.BytesIO()
+    df.to_csv(csv_bytes, index=False)
+    csv_bytes.seek(0)
+
+    media = MediaIoBaseUpload(csv_bytes, mimetype="text/csv")
+
+    query = f"'{folder_id}' in parents and name='transactions.csv'"
+    results = service.files().list(q=query).execute()
+    files = results.get("files", [])
+
+    if files:
+        service.files().update(
+            fileId=files[0]["id"],
+            media_body=media
+        ).execute()
+    else:
+        service.files().create(
+            body={"name": "transactions.csv", "parents": [folder_id]},
+            media_body=media
+        ).execute()
 
 
 def load_budgets():
-    if os.path.exists(BUDGET_FILE):
-        try:
-            return pd.read_csv(BUDGET_FILE)
-        except:
-            return pd.DataFrame(columns=["Month", "Category", "Budget"])
-    else:
-        return pd.DataFrame(columns=["Month", "Category", "Budget"])
+    service = get_drive_service()
+    folder_id = st.secrets["drive"]["folder_id"]
+    file_id = get_drive_file_id(BUDGET_FILE)
+
+    if not file_id:
+        # Create empty budgets.csv in Drive
+        df = pd.DataFrame(columns=["Month", "Category", "Budget"])
+        csv_buffer = io.BytesIO()
+        df.to_csv(csv_buffer, index=False)
+        csv_buffer.seek(0)
+
+        media = MediaIoBaseUpload(csv_buffer, mimetype="text/csv")
+        service.files().create(
+            body={"name": BUDGET_FILE, "parents": [folder_id]},
+            media_body=media
+        ).execute()
+        return df
+
+    # Download existing file
+    request = service.files().get_media(fileId=file_id)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+
+    fh.seek(0)
+    return pd.read_csv(fh)
+
 
 def save_budget(month, category, budget):
+    service = get_drive_service()
+    folder_id = st.secrets["drive"]["folder_id"]
+    file_id = get_drive_file_id(BUDGET_FILE)
+
     df = load_budgets()
+
+    # Remove old budget for same month & category
     df = df[~((df["Month"] == month) & (df["Category"] == category))]
-    new_row = pd.DataFrame([[month, category, budget]], columns=["Month", "Category", "Budget"])
+
+    # Add new row
+    new_row = pd.DataFrame(
+        [[month, category, budget]],
+        columns=["Month", "Category", "Budget"]
+    )
     df = pd.concat([df, new_row], ignore_index=True)
-    df.to_csv(BUDGET_FILE, index=False)
+
+    # Upload back to Drive
+    csv_buffer = io.BytesIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_buffer.seek(0)
+
+    media = MediaIoBaseUpload(csv_buffer, mimetype="text/csv")
+
+    if file_id:
+        service.files().update(
+            fileId=file_id,
+            media_body=media
+        ).execute()
+    else:
+        service.files().create(
+            body={"name": BUDGET_FILE, "parents": [folder_id]},
+            media_body=media
+        ).execute()
+
 
 def calculate_remaining(month, transactions, budgets):
     # transactions is DataFrame with Date_dt
