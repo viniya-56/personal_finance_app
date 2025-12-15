@@ -76,8 +76,7 @@ def _ensure_transaction_columns(df):
 
 def load_transactions():
     service = get_drive_service()
-    folder_id = st.secrets["DRIVE_FOLDER_ID"]
-
+    folder_id = st.secrets["drive"]["folder_id"]
     query = f"'{folder_id}' in parents and name='transactions.csv'"
     results = service.files().list(q=query).execute()
     files = results.get("files", [])
@@ -112,7 +111,7 @@ def save_transaction(date, amount, category, description, mode, group_name):
 
     # Upload back to Drive
     service = get_drive_service()
-    folder_id = st.secrets["DRIVE_FOLDER_ID"]
+    folder_id = st.secrets["drive"]["folder_id"]
 
     csv_bytes = io.BytesIO()
     df.to_csv(csv_bytes, index=False)
