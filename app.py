@@ -2,15 +2,15 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
-import io
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # ---------------- CONFIG ----------------
-TRANSACTION_FILE = "transactions.csv"
-BUDGET_FILE = "budgets.csv"
+SPREADSHEET_ID = st.secrets["google_sheets"]["spreadsheet_id"]
+
+TRANSACTION_SHEET = "transactions"
+BUDGET_SHEET = "budgets"
 
 CATEGORIES = [
     "Food", "Transport", "Rent", "Utilities", "Trips",
@@ -18,133 +18,90 @@ CATEGORIES = [
     "Recharge", "Home Expenses", "Others"
 ]
 
-# ---------------- GOOGLE DRIVE HELPERS ----------------
-@st.cache_resource
-def get_drive_service():
+# ---------------- GOOGLE SHEETS SERVICE ----------------
+def get_sheets_service():
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"],
-        scopes=["https://www.googleapis.com/auth/drive"]
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
     )
-    return build("drive", "v3", credentials=creds)
+    return build("sheets", "v4", credentials=creds)
 
-
-def get_file_id(filename):
-    service = get_drive_service()
-    folder_id = st.secrets["drive"]["folder_id"]
-
-    query = (
-        f"name='{filename}' and "
-        f"'{folder_id}' in parents and trashed=false"
-    )
-
-    result = service.files().list(
-        q=query,
-        fields="files(id, name)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True
+# ---------------- SHEET HELPERS ----------------
+def read_sheet(sheet_name):
+    service = get_sheets_service()
+    result = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=sheet_name
     ).execute()
 
-    files = result.get("files", [])
-    return files[0]["id"] if files else None
+    values = result.get("values", [])
+    if len(values) < 2:
+        return pd.DataFrame(columns=values[0] if values else [])
 
+    return pd.DataFrame(values[1:], columns=values[0])
 
-def load_csv(filename, columns):
-    service = get_drive_service()
-    folder_id = st.secrets["drive"]["folder_id"]
-    file_id = get_file_id(filename)
+def append_row(sheet_name, row):
+    service = get_sheets_service()
+    service.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=sheet_name,
+        valueInputOption="USER_ENTERED",
+        body={"values": [row]}
+    ).execute()
 
-    # If file does NOT exist → create it
-    if not file_id:
-        df = pd.DataFrame(columns=columns)
-        buffer = io.BytesIO()
-        df.to_csv(buffer, index=False)
-        buffer.seek(0)
-
-        service.files().create(
-            body={"name": filename, "parents": [folder_id]},
-            media_body=MediaIoBaseUpload(buffer, mimetype="text/csv"),
-            supportsAllDrives=True
-        ).execute()
-
-        return df
-
-    # If file exists → download it
-    request = service.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-
-    fh.seek(0)
-    return pd.read_csv(fh)
-
-
-def save_csv(filename, df):
-    service = get_drive_service()
-    file_id = get_file_id(filename)
-
-    buffer = io.BytesIO()
-    df.to_csv(buffer, index=False)
-    buffer.seek(0)
-
-    service.files().update(
-        fileId=file_id,
-        media_body=MediaIoBaseUpload(buffer, mimetype="text/csv"),
-        supportsAllDrives=True
+def overwrite_sheet(sheet_name, df):
+    service = get_sheets_service()
+    body = {
+        "values": [df.columns.tolist()] + df.astype(str).values.tolist()
+    }
+    service.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=sheet_name,
+        valueInputOption="USER_ENTERED",
+        body=body
     ).execute()
 
 # ---------------- DATA FUNCTIONS ----------------
 def load_transactions():
-    df = load_csv(
-        TRANSACTION_FILE,
-        ["Date", "Amount", "Category", "Description", "Mode"]
-    )
+    df = read_sheet(TRANSACTION_SHEET)
     if not df.empty:
+        df["Amount"] = df["Amount"].astype(float)
         df["Date"] = pd.to_datetime(df["Date"], dayfirst=True)
     return df
 
-
 def save_transaction(date, amount, category, description, mode):
-    df = load_transactions()
-
-    new_row = pd.DataFrame([{
-        "Date": date.strftime("%d/%m/%Y"),
-        "Amount": amount,
-        "Category": category,
-        "Description": description,
-        "Mode": mode
-    }])
-
-    df = pd.concat([new_row, df], ignore_index=True)
-    save_csv(TRANSACTION_FILE, df)
-
+    append_row(
+        TRANSACTION_SHEET,
+        [
+            date.strftime("%d/%m/%Y"),
+            amount,
+            category,
+            description,
+            mode
+        ]
+    )
 
 def load_budgets():
-    return load_csv(BUDGET_FILE, ["Month", "Category", "Budget"])
-
+    df = read_sheet(BUDGET_SHEET)
+    if not df.empty:
+        df["Budget"] = df["Budget"].astype(float)
+    return df
 
 def save_budget(month, category, budget):
     df = load_budgets()
 
+    if df.empty:
+        df = pd.DataFrame(columns=["Month", "Category", "Budget"])
+
     df = df[~((df["Month"] == month) & (df["Category"] == category))]
-
-    new_row = pd.DataFrame([{
-        "Month": month,
-        "Category": category,
-        "Budget": budget
-    }])
-
-    df = pd.concat([df, new_row], ignore_index=True)
-    save_csv(BUDGET_FILE, df)
+    df = pd.concat(
+        [df, pd.DataFrame([[month, category, budget]], columns=df.columns)],
+        ignore_index=True
+    )
+    overwrite_sheet(BUDGET_SHEET, df)
 
 # ---------------- UI ----------------
-st.set_page_config(
-    page_title="💰 Personal Finance",
-    layout="wide"
-)
-
+st.set_page_config(page_title="💰 Personal Finance", layout="wide")
 st.title("💰 Personal Finance Tracker")
 
 menu = st.sidebar.radio(
@@ -154,75 +111,46 @@ menu = st.sidebar.radio(
 
 # -------- ADD TRANSACTION --------
 if menu == "Add Transaction":
-    st.subheader("➕ Add Transaction")
+    st.header("➕ Add Transaction")
 
-    with st.form("add_tx"):
+    with st.form("add_tx", clear_on_submit=True):
         date = st.date_input("Date", datetime.today())
         amount = st.number_input("Amount", min_value=1.0, step=1.0)
         category = st.selectbox("Category", CATEGORIES)
         description = st.text_input("Description")
         mode = st.selectbox("Payment Mode", ["UPI", "Cash", "Card", "Bank"])
 
-        submitted = st.form_submit_button("Save Transaction")
-
-        if submitted:
+        if st.form_submit_button("Save"):
             save_transaction(date, amount, category, description, mode)
             st.success("✅ Transaction saved")
 
 # -------- VIEW TRANSACTIONS --------
 elif menu == "View Transactions":
-    st.subheader("📄 Transactions")
-
+    st.header("📜 Transactions")
     df = load_transactions()
+
     st.dataframe(df, use_container_width=True)
 
     if not df.empty:
-        daily = (
-            df.groupby("Date")["Amount"]
-            .sum()
-            .reset_index()
-            .sort_values("Date")
-        )
-
-        fig = px.line(
-            daily,
-            x="Date",
-            y="Amount",
-            title="Daily Expenses"
-        )
+        daily = df.groupby("Date")["Amount"].sum().reset_index()
+        fig = px.line(daily, x="Date", y="Amount", title="Daily Expenses")
         st.plotly_chart(fig, use_container_width=True)
 
 # -------- CATEGORY SUMMARY --------
 elif menu == "Category Summary":
-    st.subheader("📊 Category Summary")
-
+    st.header("📊 Category Summary")
     df = load_transactions()
 
     if not df.empty:
-        cat = (
-            df.groupby("Category")["Amount"]
-            .sum()
-            .reset_index()
-        )
-
-        fig = px.pie(
-            cat,
-            names="Category",
-            values="Amount",
-            title="Expenses by Category"
-        )
+        cat = df.groupby("Category")["Amount"].sum().reset_index()
+        fig = px.pie(cat, names="Category", values="Amount", title="Expenses by Category")
         st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No transactions yet")
 
 # -------- BUDGETS --------
 elif menu == "Budgets":
-    st.subheader("💼 Monthly Budgets")
+    st.header("💵 Budgets")
 
-    month = st.text_input(
-        "Month (YYYY-MM)",
-        datetime.today().strftime("%Y-%m")
-    )
+    month = st.text_input("Month (YYYY-MM)", datetime.today().strftime("%Y-%m"))
     category = st.selectbox("Category", CATEGORIES)
     budget = st.number_input("Budget Amount", min_value=0.0, step=500.0)
 
@@ -230,5 +158,5 @@ elif menu == "Budgets":
         save_budget(month, category, budget)
         st.success("✅ Budget saved")
 
-    st.markdown("### 📋 All Budgets")
+    st.subheader("📋 All Budgets")
     st.dataframe(load_budgets(), use_container_width=True)
