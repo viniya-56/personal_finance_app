@@ -18,7 +18,7 @@ CATEGORIES = [
     "Food Related", "Home expenses", "Others"
 ]
 
-SPREADSHEET_ID = st.secrets["SPREADSHEET_ID"]
+SPREADSHEET_ID = "1qWYggVhlSYx-EtHhLGPucOeUCBJugHdujczubtFff58"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # =============================
