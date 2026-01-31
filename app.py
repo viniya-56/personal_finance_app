@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+import uuid
 
 # ---------------- CONFIG ----------------
 CATEGORIES = [
@@ -93,6 +94,7 @@ def save_transaction(date, amount, category, description, mode):
     df = load_transactions()
 
     new_row = {
+        "TransactionID": str(uuid.uuid4()),
         "Date": date.strftime("%d/%m/%Y"),
         "Amount": amount,
         "Category": category,
@@ -100,15 +102,13 @@ def save_transaction(date, amount, category, description, mode):
         "Mode": mode
     }
 
-    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    df = pd.concat([pd.DataFrame([new_row]), df], ignore_index=True)
 
-    # 🔑 SORT: latest first
     df["Date_dt"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
     df = df.sort_values("Date_dt", ascending=False)
     df = df.drop(columns=["Date_dt"])
 
     write_sheet(TRANSACTIONS_SHEET, df)
-
 
 
 
@@ -137,6 +137,7 @@ menu = st.sidebar.radio(
     [
         "Add Transaction",
         "View Transactions",
+        "Edit Transaction",
         "Category Summary",
         "Date Range Report",
         "Budgets",
@@ -167,20 +168,90 @@ elif menu == "View Transactions":
     if df.empty:
         st.warning("No transactions found.")
     else:
-        df_display = df.copy()
-        df_display.insert(0, "Delete", False)
-
-        edited_df = st.data_editor(
-            df_display,
-            use_container_width=True,
-            num_rows="fixed"
+        st.dataframe(
+            df.drop(columns=["TransactionID"]),
+            use_container_width=True
         )
 
-        if st.button("🗑️ Delete Selected Transactions"):
-            cleaned_df = edited_df[edited_df["Delete"] == False].drop(columns=["Delete"])
-            write_sheet(TRANSACTIONS_SHEET, cleaned_df)
-            st.success("Selected transactions deleted")
+
+# -------- EDIT TRANSACTION --------
+
+elif menu == "Edit Transaction":
+    st.header("✏️ Edit / Delete Transaction")
+
+    df = load_transactions()
+
+    if df.empty:
+        st.warning("No transactions available.")
+    else:
+        df["Label"] = (
+            df["Date"] + " | ₹" + df["Amount"].astype(str) +
+            " | " + df["Category"]
+        )
+
+        selected_label = st.selectbox(
+            "Select a transaction",
+            df["Label"]
+        )
+
+        selected_row = df[df["Label"] == selected_label].iloc[0]
+
+        with st.form("edit_tx"):
+            date = st.date_input(
+                "Date",
+                datetime.strptime(selected_row["Date"], "%d/%m/%Y")
+            )
+            amount = st.number_input(
+                "Amount",
+                value=float(selected_row["Amount"])
+            )
+            category = st.selectbox(
+                "Category",
+                CATEGORIES,
+                index=CATEGORIES.index(selected_row["Category"])
+            )
+            description = st.text_input(
+                "Description",
+                selected_row["Description"]
+            )
+            mode = st.selectbox(
+                "Payment Mode",
+                ["UPI", "Cash", "Card", "Bank"],
+                index=["UPI", "Cash", "Card", "Bank"].index(selected_row["Mode"])
+            )
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                save = st.form_submit_button("💾 Save Changes")
+            with col2:
+                delete = st.form_submit_button("🗑️ Delete")
+            with col3:
+                cancel = st.form_submit_button("❌ Cancel")
+
+        # -------- SAVE --------
+        if save:
+            df.loc[df["TransactionID"] == selected_row["TransactionID"], [
+                "Date", "Amount", "Category", "Description", "Mode"
+            ]] = [
+                date.strftime("%d/%m/%Y"),
+                amount,
+                category,
+                description,
+                mode
+            ]
+
+            write_sheet(TRANSACTIONS_SHEET, df)
+            st.success("Transaction updated")
             st.rerun()
+
+        # -------- DELETE --------
+        if delete:
+            df = df[df["TransactionID"] != selected_row["TransactionID"]]
+            write_sheet(TRANSACTIONS_SHEET, df)
+            st.success("Transaction deleted")
+            st.rerun()
+
 
 # -------- CATEGORY SUMMARY --------
 elif menu == "Category Summary":
