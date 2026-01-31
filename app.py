@@ -91,6 +91,7 @@ def load_transactions():
 
 def save_transaction(date, amount, category, description, mode):
     df = load_transactions()
+
     new_row = {
         "Date": date.strftime("%d/%m/%Y"),
         "Amount": amount,
@@ -98,8 +99,18 @@ def save_transaction(date, amount, category, description, mode):
         "Description": description,
         "Mode": mode
     }
-    df = pd.concat([pd.DataFrame([new_row]), df], ignore_index=True)
+
+    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+    # 🔑 SORT: latest first
+    df["Date_dt"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+    df = df.sort_values("Date_dt", ascending=False)
+    df = df.drop(columns=["Date_dt"])
+
     write_sheet(TRANSACTIONS_SHEET, df)
+
+
+
 
 # ---------------- BUDGETS ----------------
 def load_budgets():
@@ -149,11 +160,27 @@ if menu == "Add Transaction":
 
 # -------- VIEW TRANSACTIONS --------
 elif menu == "View Transactions":
+    st.header("📜 All Transactions")
+
     df = load_transactions()
+
     if df.empty:
-        st.warning("No transactions found")
+        st.warning("No transactions found.")
     else:
-        st.dataframe(df.drop(columns=["Date_dt"]), use_container_width=True)
+        df_display = df.copy()
+        df_display.insert(0, "Delete", False)
+
+        edited_df = st.data_editor(
+            df_display,
+            use_container_width=True,
+            num_rows="fixed"
+        )
+
+        if st.button("🗑️ Delete Selected Transactions"):
+            cleaned_df = edited_df[edited_df["Delete"] == False].drop(columns=["Delete"])
+            write_sheet(TRANSACTIONS_SHEET, cleaned_df)
+            st.success("Selected transactions deleted")
+            st.rerun()
 
 # -------- CATEGORY SUMMARY --------
 elif menu == "Category Summary":
