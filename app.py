@@ -104,10 +104,6 @@ def save_transaction(date, amount, category, description, mode):
 
     df = pd.concat([pd.DataFrame([new_row]), df], ignore_index=True)
 
-    df["Date_dt"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
-    df = df.sort_values("Date_dt", ascending=False)
-    df = df.drop(columns=["Date_dt"])
-
     write_sheet(TRANSACTIONS_SHEET, df)
 
 
