@@ -6,9 +6,18 @@ from googleapiclient.discovery import build
 
 # ---------------- CONFIG ----------------
 CATEGORIES = [
-    "Food", "Transport", "Rent", "Utilities", "Trips",
-    "Shopping", "Entertainment", "Healthcare",
-    "Recharge", "Home Expenses", "Others"
+    "Food",
+    "Transport",
+    "Rent",
+    "Electricity Bill",
+    "Utilities",
+    "Recharge",
+    "Home Expenses",
+    "Shopping",
+    "Entertainment",
+    "Healthcare",
+    "Trips",
+    "Others"
 ]
 
 TRANSACTIONS_SHEET = "Transactions"
@@ -22,7 +31,28 @@ def get_sheets_service():
     )
     return build("sheets", "v4", credentials=creds)
 
-SHEET_ID = st.secrets["sheets"]["spreadsheet_id"]
+# ---------------- LOGIN ----------------
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+if st.session_state.user is None:
+    st.title("🔐 Login")
+
+    username = st.text_input("Enter username")
+
+    if st.button("Login"):
+        users = st.secrets["users"]
+        if username in users:
+            st.session_state.user = username
+            st.session_state.sheet_id = users[username]
+            st.success(f"Welcome, {username} 👋")
+            st.rerun()
+        else:
+            st.error("User not found")
+
+    st.stop()
+
+SHEET_ID = st.session_state.sheet_id
 
 # ---------------- DATA HELPERS ----------------
 def read_sheet(sheet_name):
@@ -41,7 +71,8 @@ def read_sheet(sheet_name):
 def write_sheet(sheet_name, df):
     service = get_sheets_service()
     body = {
-        "values": [df.columns.tolist()] + df.astype(str).fillna("").values.tolist()
+        "values": [df.columns.tolist()] +
+                  df.astype(str).fillna("").values.tolist()
     }
     service.spreadsheets().values().update(
         spreadsheetId=SHEET_ID,
@@ -55,6 +86,7 @@ def load_transactions():
     df = read_sheet(TRANSACTIONS_SHEET)
     if not df.empty:
         df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce")
+        df["Date_dt"] = pd.to_datetime(df["Date"], dayfirst=True)
     return df
 
 def save_transaction(date, amount, category, description, mode):
@@ -79,41 +111,69 @@ def load_budgets():
 def save_budget(month, category, budget):
     df = load_budgets()
     df = df[~((df["Month"] == month) & (df["Category"] == category))]
-    df = pd.concat([df, pd.DataFrame([[month, category, budget]], columns=df.columns)])
+    df = pd.concat(
+        [df, pd.DataFrame([[month, category, budget]],
+        columns=["Month", "Category", "Budget"])]
+    )
     write_sheet(BUDGETS_SHEET, df)
 
 # ---------------- UI ----------------
 st.set_page_config("💰 Personal Finance", layout="wide")
-st.title("💰 Personal Finance Tracker")
+st.title(f"💰 Personal Finance Tracker ({st.session_state.user})")
 
 menu = st.sidebar.radio(
     "Menu",
-    ["Add Transaction", "View Transactions", "Category Summary", "Budgets"]
+    [
+        "Add Transaction",
+        "View Transactions",
+        "Category Summary",
+        "Date Range Report",
+        "Budgets",
+        "Monthly Summary"
+    ]
 )
 
 # -------- ADD TRANSACTION --------
 if menu == "Add Transaction":
-    with st.form("add_tx"):
+    with st.form("add_tx", clear_on_submit=True):
         date = st.date_input("Date", datetime.today())
         amount = st.number_input("Amount", min_value=1.0)
         category = st.selectbox("Category", CATEGORIES)
         description = st.text_input("Description")
         mode = st.selectbox("Payment Mode", ["UPI", "Cash", "Card", "Bank"])
-        if st.form_submit_button("Save"):
+        submitted = st.form_submit_button("Save")
+
+        if submitted:
             save_transaction(date, amount, category, description, mode)
-            st.success("Transaction saved!")
+            st.success("✅ Transaction saved")
 
 # -------- VIEW TRANSACTIONS --------
 elif menu == "View Transactions":
     df = load_transactions()
-    st.dataframe(df, use_container_width=True)
+    if df.empty:
+        st.warning("No transactions found")
+    else:
+        st.dataframe(df.drop(columns=["Date_dt"]), use_container_width=True)
 
 # -------- CATEGORY SUMMARY --------
 elif menu == "Category Summary":
     df = load_transactions()
     if not df.empty:
-        summary = df.groupby("Category")["Amount"].sum().reset_index()
-        st.bar_chart(summary.set_index("Category"))
+        summary = df.groupby("Category")["Amount"].sum().sort_values(ascending=False)
+        st.dataframe(summary.reset_index())
+        st.bar_chart(summary)
+
+# -------- DATE RANGE --------
+elif menu == "Date Range Report":
+    df = load_transactions()
+    if not df.empty:
+        start = st.date_input("Start Date", df["Date_dt"].min().date())
+        end = st.date_input("End Date", df["Date_dt"].max().date())
+
+        mask = (df["Date_dt"].dt.date >= start) & (df["Date_dt"].dt.date <= end)
+        filtered = df[mask]
+        st.dataframe(filtered.drop(columns=["Date_dt"]))
+        st.success(f"Total: ₹{filtered['Amount'].sum():,.2f}")
 
 # -------- BUDGETS --------
 elif menu == "Budgets":
@@ -126,3 +186,18 @@ elif menu == "Budgets":
         st.success("Budget saved")
 
     st.dataframe(load_budgets())
+
+# -------- SUMMARY --------
+elif menu == "Monthly Summary":
+    df = load_transactions()
+    budgets = load_budgets()
+    month = st.text_input("Month (YYYY-MM)", datetime.today().strftime("%Y-%m"))
+
+    if not df.empty and not budgets.empty:
+        df["Month"] = df["Date_dt"].dt.to_period("M").astype(str)
+        spent = df[df["Month"] == month].groupby("Category")["Amount"].sum()
+        summary = budgets[budgets["Month"] == month].copy()
+        summary["Spent"] = summary["Category"].map(spent).fillna(0)
+        summary["Remaining"] = summary["Budget"] - summary["Spent"]
+        st.dataframe(summary)
+        st.bar_chart(summary.set_index("Category")["Remaining"])
