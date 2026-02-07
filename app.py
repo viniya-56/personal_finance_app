@@ -6,11 +6,29 @@ from googleapiclient.discovery import build
 from datetime import datetime
 
 # ================= CONFIG =================
-SPREADSHEET_ID = st.secrets["gcp"]["spreadsheet_id"]
-SERVICE_ACCOUNT_INFO = st.secrets["gcp"]["service_account"]
+# ---------------- CONFIG ----------------
+CATEGORIES = [
+    "Food",
+    "Transport",
+    "Rent",
+    "Electricity Bill",
+    "Utilities",
+    "Recharge",
+    "Home Expenses",
+    "Shopping",
+    "Entertainment",
+    "Healthcare",
+    "Trips",
+    "Others"
+]
+
+TRANSACTIONS_SHEET = "Transactions"
+BUDGETS_SHEET = "Budgets"
+
+
+SERVICE_ACCOUNT_INFO = st.secrets["gcp_service_account"]
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-TRANSACTIONS_SHEET = "Transactions"
 
 # ================= AUTH =================
 creds = Credentials.from_service_account_info(
@@ -18,10 +36,34 @@ creds = Credentials.from_service_account_info(
 )
 service = build("sheets", "v4", credentials=creds)
 
+# ---------------- LOGIN ----------------
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+if st.session_state.user is None:
+    st.title("🔐 Login")
+
+    username = st.text_input("Enter username")
+
+    if st.button("Login"):
+        users = st.secrets["users"]
+        if username in users:
+            st.session_state.user = username
+            st.session_state.sheet_id = users[username]
+            st.success(f"Welcome, {username} 👋")
+            st.rerun()
+        else:
+            st.error("User not found")
+
+    st.stop()
+
+SHEET_ID = st.session_state.sheet_id
+
+
 # ================= SHEETS HELPERS =================
 def read_sheet(sheet_name):
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=SHEET_ID,
         range=sheet_name
     ).execute()
 
@@ -41,7 +83,7 @@ def write_sheet(sheet_name, df):
     }
 
     service.spreadsheets().values().update(
-        spreadsheetId=SPREADSHEET_ID,
+        spreadsheetId=SHEET_ID,
         range=f"{sheet_name}!A1",
         valueInputOption="RAW",
         body=body
