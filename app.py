@@ -264,15 +264,24 @@ elif menu == "Category Summary":
 
 # -------- DATE RANGE --------
 elif menu == "Date Range Report":
+    st.header("📅 Expenses Between Dates")
     df = load_transactions()
     if not df.empty:
-        start = st.date_input("Start Date", df["Date_dt"].min().date())
-        end = st.date_input("End Date", df["Date_dt"].max().date())
+        df["Date_dt"] = pd.to_datetime(df["Date"], dayfirst=True)
+        start_date = st.date_input("Start Date", df["Date_dt"].min().date())
+        end_date = st.date_input("End Date", df["Date_dt"].max().date())
+        category_filter = st.selectbox("Filter by Category (optional)", ["All"] + CATEGORIES)
 
-        mask = (df["Date_dt"].dt.date >= start) & (df["Date_dt"].dt.date <= end)
+        mask = (df["Date_dt"].dt.date >= start_date) & (df["Date_dt"].dt.date <= end_date)
         filtered = df[mask]
-        st.dataframe(filtered.drop(columns=["Date_dt"]))
-        st.success(f"Total: ₹{filtered['Amount'].sum():,.2f}")
+
+        if category_filter != "All":
+            filtered = filtered[filtered["Category"] == category_filter]
+
+        filtered_display = filtered.copy()
+        filtered_display["Date"] = filtered_display["Date_dt"].dt.strftime("%d/%m/%Y")
+        st.dataframe(filtered_display.drop(columns=["Date_dt"]), use_container_width=True)
+        st.success(f"Total Expenses: Rs.{filtered['Amount'].sum():,.2f}")
 
 # -------- BUDGETS --------
 elif menu == "Budgets":
